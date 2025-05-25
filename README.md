@@ -64,3 +64,6 @@ Pull requests are welcome! Please add tests for new features and ensure all test
 
 ## License
 [MIT](LICENSE)
+
+## TODO
+- fix score logic
