@@ -1,11 +1,11 @@
 import 'package:flame/game.dart';
 import 'package:flame/components.dart';
 import 'package:flame/input.dart';
-import 'package:flame_audio/flame_audio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:math';
 import 'package:flame/collisions.dart';
+import 'audio_manager.dart';
 
 void main() {
   runApp(
@@ -42,6 +42,7 @@ void main() {
 class AsteroidsGame extends FlameGame
     with HasKeyboardHandlerComponents, HasCollisionDetection {
   late PlayerShip player;
+  late AudioManager audioManager;
   int score = 0;
   int highScore = 0; // Session-based high score
   int lives = 3;
@@ -59,21 +60,15 @@ class AsteroidsGame extends FlameGame
   @override
   Future<void> onLoad() async {
     await super.onLoad();
+    
+    // Initialize audio manager
+    audioManager = AudioManager();
+    await audioManager.initialize();
+    await audioManager.startBackgroundMusic();
+    
     // Add starfield background
     add(Starfield(numStars: 100));
-    // Load audio assets
-    await FlameAudio.audioCache.loadAll([
-      'shoot.wav',
-      'thrust.wav',
-      'explosion_small.wav',
-      'explosion_medium.wav',
-      'explosion_large.wav',
-      'saucerSmall.wav',
-      'saucerBig.wav',
-      'beat1.wav',
-      'beat2.wav',
-      'extraShip.wav',
-    ]);
+    
     // Add player ship
     player = PlayerShip();
     add(player);
@@ -111,18 +106,22 @@ class AsteroidsGame extends FlameGame
   void pauseGame() {
     isPaused = true;
     pauseEngine();
+    audioManager.pauseBackgroundMusic();
     overlays.add('PauseOverlay');
   }
 
   void resumeGame() {
     isPaused = false;
     resumeEngine();
+    audioManager.startBackgroundMusic();
     overlays.remove('PauseOverlay');
   }
 
   void gameOverSequence() {
     gameOver = true;
     pauseEngine();
+    audioManager.stopBackgroundMusic();
+    audioManager.playGameOver();
     overlays.add('GameOverOverlay');
   }
 
@@ -161,6 +160,7 @@ class AsteroidsGame extends FlameGame
     overlays.remove('GameOverOverlay');
     overlays.add('ScoreOverlay');
     resumeEngine();
+    audioManager.startBackgroundMusic();
     for (int i = 0; i < 5; i++) {
       spawnAsteroid();
     }
@@ -183,6 +183,12 @@ class AsteroidsGame extends FlameGame
       return KeyEventResult.handled;
     }
     return super.onKeyEvent(event, keysPressed);
+  }
+
+  @override
+  void onRemove() {
+    audioManager.dispose();
+    super.onRemove();
   }
 }
 
@@ -270,16 +276,7 @@ class PlayerShip extends PositionComponent
     }
     // Handle thrust
     if (accelerating || gameRef.touchThrust) {
-      // Add acceleration in the direction the ship is facing
-      final direction = Vector2(0, -1)..rotate(angle);
-      velocity += direction * thrust * dt;
-      // Play thrust sound if not already playing
-      if (!thrustSoundPlaying) {
-        FlameAudio.play('thrust.wav').then((_) {
-          thrustSoundPlaying = false;
-        });
-        thrustSoundPlaying = true;
-      }
+      applyThrust(dt);
     } else {
       thrustSoundPlaying = false;
     }
@@ -306,12 +303,23 @@ class PlayerShip extends PositionComponent
     }
   }
 
+  void applyThrust(double dt) {
+    if (!accelerating) {
+      accelerating = true;
+      gameRef.audioManager.playThrust();
+    }
+    final thrustVector = Vector2(cos(angle), sin(angle)) * dt * thrust;
+    velocity.add(thrustVector);
+  }
+
   void shoot() {
-    // Spawn a bullet in the direction the ship is facing
-    final dir = Vector2(0, -1)..rotate(angle);
-    final bulletPos = position + dir * (size.y / 2 + 5);
-    gameRef.add(Bullet(position: bulletPos, direction: dir));
-    FlameAudio.play('shoot.wav');
+    if (shootTimer <= 0) {
+      final bulletVelocity = Vector2(cos(angle), sin(angle)) * 500;
+      final bulletPosition = position.clone();
+      gameRef.add(Bullet(position: bulletPosition, velocity: bulletVelocity));
+      gameRef.audioManager.playShoot();
+      shootTimer = shootCooldown;
+    }
   }
 
   @override
@@ -326,11 +334,12 @@ class PlayerShip extends PositionComponent
 
   @override
   void onCollision(Set<Vector2> intersectionPoints, PositionComponent other) {
-    super.onCollision(intersectionPoints, other);
-    if (other is Asteroid && !gameRef.respawning && !invincible) {
-      FlameAudio.play('explosion_large.wav');
-      removeFromParent();
-      gameRef.loseLife();
+    if (!invincible) {
+      if (other is Asteroid) {
+        gameRef.audioManager.playExplosion();
+        removeFromParent();
+        gameRef.loseLife();
+      }
     }
   }
 }
@@ -338,9 +347,9 @@ class PlayerShip extends PositionComponent
 class Bullet extends CircleComponent
     with HasGameRef<AsteroidsGame>, CollisionCallbacks {
   static const double speed = 400.0;
-  Vector2 direction;
+  Vector2 velocity;
   double life = 2.0; // seconds
-  Bullet({required Vector2 position, required this.direction})
+  Bullet({required Vector2 position, required this.velocity})
     : super(
         radius: 3,
         position: position,
@@ -357,7 +366,7 @@ class Bullet extends CircleComponent
   @override
   void update(double dt) {
     super.update(dt);
-    position += direction * speed * dt;
+    position += velocity * speed * dt;
     // Screen wrap
     final screen = gameRef.size;
     if (position.x < 0) position.x += screen.x;
@@ -376,11 +385,7 @@ class Bullet extends CircleComponent
     if (other is Asteroid) {
       // Play explosion sound
       if (radius > 30) {
-        FlameAudio.play('explosion_large.wav');
-      } else if (radius > 20) {
-        FlameAudio.play('explosion_medium.wav');
-      } else {
-        FlameAudio.play('explosion_small.wav');
+        gameRef.audioManager.playExplosion();
       }
       // Increase score
       gameRef.increaseScore(100);
@@ -403,7 +408,6 @@ class Bullet extends CircleComponent
     }
     if (other is PlayerShip) {
       // Player hit: game over
-      FlameAudio.play('explosion_large.wav');
       gameRef.gameOverSequence();
     }
   }
@@ -480,11 +484,7 @@ class Asteroid extends PositionComponent
     if (other is Bullet) {
       // Play explosion sound
       if (radius > 30) {
-        FlameAudio.play('explosion_large.wav');
-      } else if (radius > 20) {
-        FlameAudio.play('explosion_medium.wav');
-      } else {
-        FlameAudio.play('explosion_small.wav');
+        gameRef.audioManager.playExplosion();
       }
       // Increase score
       gameRef.increaseScore(100);
@@ -507,7 +507,6 @@ class Asteroid extends PositionComponent
     }
     if (other is PlayerShip) {
       // Player hit: game over
-      FlameAudio.play('explosion_large.wav');
       gameRef.gameOverSequence();
     }
   }
