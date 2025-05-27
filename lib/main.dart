@@ -8,12 +8,13 @@ import 'package:flame/collisions.dart';
 import 'audio_manager.dart';
 
 void main() {
+  final asteroidsGame = AsteroidsGame();
   runApp(
     MaterialApp(
       home: Stack(
         children: [
           GameWidget(
-            game: AsteroidsGame(),
+            game: asteroidsGame,
             overlayBuilderMap: {
               'ScoreOverlay': (context, AsteroidsGame game) =>
                   ScoreOverlay(game: game),
@@ -28,7 +29,7 @@ void main() {
             builder: (context) {
               final isMobile = MediaQuery.of(context).size.shortestSide < 600;
               return isMobile
-                  ? TouchControls(game: AsteroidsGame())
+                  ? TouchControls(game: asteroidsGame)
                   : const SizedBox.shrink();
             },
           ),
@@ -60,15 +61,15 @@ class AsteroidsGame extends FlameGame
   @override
   Future<void> onLoad() async {
     await super.onLoad();
-    
+
     // Initialize audio manager
     audioManager = AudioManager();
     await audioManager.initialize();
     await audioManager.startBackgroundMusic();
-    
+
     // Add starfield background
     add(Starfield(numStars: 100));
-    
+
     // Add player ship
     player = PlayerShip();
     add(player);
@@ -209,6 +210,7 @@ class PlayerShip extends PositionComponent
   double invincibleTimer = 0.0;
   bool _blink = false;
   bool thrustSoundPlaying = false;
+  bool wasTouchShoot = false;
 
   PlayerShip({this.invincible = false})
     : super(size: Vector2(40, 40), anchor: Anchor.center);
@@ -292,7 +294,7 @@ class PlayerShip extends PositionComponent
     velocity *= 0.99;
 
     // Shooting logic
-    if (shooting || gameRef.touchShoot) {
+    if (shooting) {
       shootTimer -= dt;
       if (shootTimer <= 0) {
         shoot();
@@ -301,6 +303,13 @@ class PlayerShip extends PositionComponent
     } else {
       shootTimer = 0;
     }
+
+    // Touch fire button: fire once per tap
+    if (gameRef.touchShoot && !wasTouchShoot) {
+      shoot();
+      shootTimer = shootCooldown;
+    }
+    wasTouchShoot = gameRef.touchShoot;
   }
 
   void applyThrust(double dt) {
@@ -308,18 +317,22 @@ class PlayerShip extends PositionComponent
       accelerating = true;
       gameRef.audioManager.playThrust();
     }
-    final thrustVector = Vector2(cos(angle), sin(angle)) * dt * thrust;
+    final thrustVector = (Vector2(0, -1)..rotate(angle)) * dt * thrust;
     velocity.add(thrustVector);
   }
 
   void shoot() {
-    if (shootTimer <= 0) {
-      final bulletVelocity = Vector2(cos(angle), sin(angle)) * 500;
-      final bulletPosition = position.clone();
-      gameRef.add(Bullet(position: bulletPosition, velocity: bulletVelocity));
-      gameRef.audioManager.playShoot();
-      shootTimer = shootCooldown;
-    }
+    debugPrint('PlayerShip.shoot() called');
+    final bulletVelocity = Vector2(0, -1)..rotate(angle);
+    final bulletPosition = position.clone();
+    gameRef.add(
+      Bullet(
+        position: bulletPosition,
+        velocity: bulletVelocity,
+        fromPlayer: true,
+      ),
+    );
+    gameRef.audioManager.playShoot();
   }
 
   @override
@@ -349,13 +362,17 @@ class Bullet extends CircleComponent
   static const double speed = 400.0;
   Vector2 velocity;
   double life = 2.0; // seconds
-  Bullet({required Vector2 position, required this.velocity})
-    : super(
-        radius: 3,
-        position: position,
-        anchor: Anchor.center,
-        paint: Paint()..color = const Color(0xFFFFFFFF),
-      );
+  final bool fromPlayer;
+  Bullet({
+    required Vector2 position,
+    required this.velocity,
+    this.fromPlayer = false,
+  }) : super(
+         radius: 3,
+         position: position,
+         anchor: Anchor.center,
+         paint: Paint()..color = const Color(0xFFFFFFFF),
+       );
 
   @override
   Future<void> onLoad() async {
@@ -406,8 +423,8 @@ class Bullet extends CircleComponent
       removeFromParent();
       other.removeFromParent();
     }
-    if (other is PlayerShip) {
-      // Player hit: game over
+    if (other is PlayerShip && !fromPlayer) {
+      // Player hit: game over (only if not player's own bullet)
       gameRef.gameOverSequence();
     }
   }
@@ -689,12 +706,17 @@ class TouchControls extends StatelessWidget {
             onReleased: () => game.touchThrust = false,
             size: buttonSize,
           ),
-          // Shoot
+          // Shoot (call shoot directly)
           _TouchButton(
             icon: Icons.circle,
-            onPressed: () => game.touchShoot = true,
-            onReleased: () => game.touchShoot = false,
+            onPressed: () {
+              if (!game.gameOver && !game.isPaused && !game.respawning) {
+                game.player.shoot();
+              }
+            },
+            onReleased: () {}, // no-op
             size: buttonSize,
+            isFire: true,
           ),
           // Right
           _TouchButton(
@@ -714,29 +736,49 @@ class _TouchButton extends StatelessWidget {
   final VoidCallback onPressed;
   final VoidCallback onReleased;
   final double size;
+  final bool isFire;
   const _TouchButton({
     required this.icon,
     required this.onPressed,
     required this.onReleased,
     required this.size,
+    this.isFire = false,
   });
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => onPressed(),
-      onTapUp: (_) => onReleased(),
-      onTapCancel: () => onReleased(),
-      child: Container(
-        width: size,
-        height: size,
-        margin: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.15),
-          shape: BoxShape.circle,
+    if (isFire) {
+      // Fire button: fire instantly on tap
+      return GestureDetector(
+        onTap: onPressed,
+        child: Container(
+          width: size,
+          height: size,
+          margin: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.15),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, color: Colors.white, size: size * 0.7),
         ),
-        child: Icon(icon, color: Colors.white, size: size * 0.7),
-      ),
-    );
+      );
+    } else {
+      // Other buttons: hold for continuous action
+      return GestureDetector(
+        onTapDown: (_) => onPressed(),
+        onTapUp: (_) => onReleased(),
+        onTapCancel: () => onReleased(),
+        child: Container(
+          width: size,
+          height: size,
+          margin: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.15),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, color: Colors.white, size: size * 0.7),
+        ),
+      );
+    }
   }
 }
 
